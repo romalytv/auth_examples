@@ -1,17 +1,19 @@
-const uuid = require('uuid');
 const express = require('express');
-const onFinished = require('on-finished');
 const bodyParser = require('body-parser');
 const path = require('path');
-const port = 3000;
+const jwt = require('jsonwebtoken');
 const fs = require('fs');
+const port = 3000;
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// JWT секретний ключ
+const SECRET_KEY = 'roma12';
 const SESSION_KEY = 'Authorization';
 
+// Клас для роботи з сесіями
 class Session {
     #sessions = {}
 
@@ -19,9 +21,8 @@ class Session {
         try {
             this.#sessions = fs.readFileSync('./sessions.json', 'utf8');
             this.#sessions = JSON.parse(this.#sessions.trim());
-
             console.log(this.#sessions);
-        } catch(e) {
+        } catch (e) {
             this.#sessions = {};
         }
     }
@@ -42,15 +43,7 @@ class Session {
         return this.#sessions[key];
     }
 
-    init(res) {
-        const sessionId = uuid.v4();
-        this.set(sessionId);
-
-        return sessionId;
-    }
-
-    destroy(req, res) {
-        const sessionId = req.sessionId;
+    destroy(sessionId) {
         delete this.#sessions[sessionId];
         this.#storeSessions();
     }
@@ -58,45 +51,35 @@ class Session {
 
 const sessions = new Session();
 
+// Middleware для перевірки JWT і сесій
 app.use((req, res, next) => {
+    const token = req.get(SESSION_KEY);
     let currentSession = {};
-    let sessionId = req.get(SESSION_KEY);
 
-    if (sessionId) {
-        currentSession = sessions.get(sessionId);
-        if (!currentSession) {
-            currentSession = {};
-            sessionId = sessions.init(res);
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, SECRET_KEY);
+            const sessionId = decoded.sessionId;
+
+            // Отримуємо сесію з серверного сховища
+            currentSession = sessions.get(sessionId) || {};
+            req.session = currentSession;
+            req.sessionId = sessionId;
+        } catch (e) {
+            return res.status(401).send('Invalid or expired token.');
         }
     } else {
-        sessionId = sessions.init(res);
+        req.session = {};
     }
 
-    req.session = currentSession;
-    req.sessionId = sessionId;
-
-    onFinished(req, () => {
-        const currentSession = req.session;
-        const sessionId = req.sessionId;
-        sessions.set(sessionId, currentSession);
+    // Зберігаємо сесію після завершення запиту
+    res.on('finish', () => {
+        if (req.sessionId) {
+            sessions.set(req.sessionId, req.session);
+        }
     });
 
     next();
-});
-
-app.get('/', (req, res) => {
-    if (req.session.username) {
-        return res.json({
-            username: req.session.username,
-            logout: 'http://localhost:3000/logout'
-        })
-    }
-    res.sendFile(path.join(__dirname+'/index.html'));
-})
-
-app.get('/logout', (req, res) => {
-    sessions.destroy(req, res);
-    res.redirect('/');
 });
 
 const users = [
@@ -110,28 +93,46 @@ const users = [
         password: 'Password1',
         username: 'Username1',
     }
-]
+];
+
+app.get('/', (req, res) => {
+    if (req.session.username) {
+        return res.json({
+            username: req.session.username,
+            logout: 'http://localhost:3000/logout'
+        });
+    }
+    res.sendFile(path.join(__dirname + '/index.html'));
+});
+
+app.get('/logout', (req, res) => {
+    if (req.sessionId) {
+        sessions.destroy(req.sessionId);
+    }
+    res.send('You have been logged out.');
+});
 
 app.post('/api/login', (req, res) => {
     const { login, password } = req.body;
 
-    const user = users.find((user) => {
-        if (user.login == login && user.password == password) {
-            return true;
-        }
-        return false
-    });
+    const user = users.find((user) => user.login === login && user.password === password);
 
     if (user) {
-        req.session.username = user.username;
-        req.session.login = user.login;
+        const sessionId = new Date().getTime().toString(); // Унікальний ідентифікатор
+        sessions.set(sessionId, { username: user.username, login: user.login });
 
-        res.json({ token: req.sessionId });
+        const token = jwt.sign(
+            { sessionId },
+            SECRET_KEY,
+            { expiresIn: '1h' }
+        );
+
+        return res.json({ token });
     }
 
-    res.status(401).send();
+    res.status(401).send('Invalid login or password.');
 });
 
 app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`)
-})
+    console.log(`Example app listening on port ${port}`);
+});
